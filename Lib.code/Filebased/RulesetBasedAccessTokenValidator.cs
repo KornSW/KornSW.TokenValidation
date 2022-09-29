@@ -5,12 +5,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
-using System.Linq.Expressions;
-using System.Reflection;
 using System.Text;
-using System.Text.RegularExpressions;
-using System.Threading;
-using System.Threading.Tasks;
 
 namespace Security.AccessTokenHandling {
 
@@ -91,18 +86,67 @@ namespace Security.AccessTokenHandling {
       }
 
       JwtContent jwtContent = null;
-      SubjectProfileConfigurationEntry profile = null;
-
+      SubjectProfileConfigurationEntry subjectProfile = null;
+      IssuerProfileConfigurationEntry issuerProfile = null;
       //if we have not failed until here -> DECODE the Token
       if (authStateCode == 1) {
         try {
 
           jwtContent = JWT.Payload<JwtContent>(rawToken);
+  
+          string issuerName = jwtContent.iss;
+          issuerProfile = ruleset.IssuerProfiles.Where(e => e.IssuerName.Equals(issuerName, StringComparison.InvariantCultureIgnoreCase)).SingleOrDefault();
+          if (issuerProfile == null) {
+            //fallback
+            issuerProfile = ruleset.IssuerProfiles.Where(e => e.IssuerName == "?").SingleOrDefault();
+          }
+          if (issuerProfile == null) {
+            validationOutcomeMessage = "'Authorization'-Header contains an invalid bearer token (unknown issuer)!";
+            authStateCode = -2;
+          }
+          else if (issuerProfile.Disabled) {
+            validationOutcomeMessage = "issuer is blocked!";
+            authStateCode = -2;
+            issuerProfile = null;
+          }
 
-          string issuerRelatedSignKey = ruleset.JwtSignKey; //TODO: muss improfil pro issuer stehen!
+          if(issuerProfile != null) {
 
-          byte[] jwtSignKeyBytes = Encoding.ASCII.GetBytes(issuerRelatedSignKey);
-          jwtContent = JWT.Decode<JwtContent>(rawToken, jwtSignKeyBytes);
+            IDictionary<string, object> headers = JWT.Headers(rawToken);
+            string alg = headers["alg"].ToString();
+            bool useComplexJwk = (alg.StartsWith("RS", StringComparison.CurrentCultureIgnoreCase));
+
+            if (useComplexJwk) {
+              if (string.IsNullOrWhiteSpace(issuerProfile.JwkE)) {
+                validationOutcomeMessage = $"'Authorization'-Header contains an invalid bearer token (expecting JWK for alg '{alg}')!";
+                authStateCode = -2;
+              }
+              else {
+                // can be convertd from base64 PEM via this tool:  https://8gwifi.org/jwkconvertfunctions.jsp
+                Jwk jwk = new Jwk(
+                  e: issuerProfile.JwkE,
+                  n: issuerProfile.JwkN,
+                  p: issuerProfile.JwkP,
+                  q: issuerProfile.JwkQ,
+                  d: issuerProfile.JwkD,
+                  dp: issuerProfile.JwkDp,
+                  dq: issuerProfile.JwkDq,
+                  qi: issuerProfile.JwkQi
+                );
+                jwtContent = JWT.Decode<JwtContent>(rawToken, jwk);
+              }
+            }
+            else {
+              if (string.IsNullOrWhiteSpace(issuerProfile.JwtSignKey)) {
+                validationOutcomeMessage = $"'Authorization'-Header contains an invalid bearer token (expecting 'JwtSignKey' for alg '{alg}')!";
+                authStateCode = -2;
+              }
+              else {
+                byte[] jwtSignKeyBytes = Encoding.ASCII.GetBytes(issuerProfile.JwtSignKey);
+                jwtContent = JWT.Decode<JwtContent>(rawToken, jwtSignKeyBytes);
+              }
+            }
+          }
 
         }
         catch (Exception ex) {
@@ -122,47 +166,37 @@ namespace Security.AccessTokenHandling {
         }
       }
 
-      //if we have not failed until here -> validate the ISSUER
-      if (authStateCode == 1) {
-        if (ruleset.JwtAllowedIssuers != null && !ruleset.JwtAllowedIssuers.Contains("*")) {
-          if (!ruleset.JwtAllowedIssuers.Contains(jwtContent.iss)) {
-            validationOutcomeMessage = "'Authorization'-Header contains an invalid bearer token (invalid issuer)!";
-            authStateCode = -2;
-          }
-        }
-      }
-
       //if we have not failed until here -> validate the SUBJECT (try to find corr. profile)
       if (authStateCode == 1) {
         string subjectName = jwtContent.sub;
-        profile = ruleset.SubjectProfiles.Where(e => e.SubjectName.Equals(subjectName, StringComparison.InvariantCultureIgnoreCase)).SingleOrDefault();
-        if (profile == null) {
+        subjectProfile = ruleset.SubjectProfiles.Where(e => e.SubjectName.Equals(subjectName, StringComparison.InvariantCultureIgnoreCase)).SingleOrDefault();
+        if (subjectProfile == null) {
           //fallback
-          profile = ruleset.SubjectProfiles.Where(e => e.SubjectName == "(generic)").SingleOrDefault();
+          subjectProfile = ruleset.SubjectProfiles.Where(e => e.SubjectName == "?").SingleOrDefault();
         }
-        if (profile == null) {
+        if (subjectProfile == null) {
           validationOutcomeMessage = "'Authorization'-Header contains an invalid bearer token (unknown subject)!";
           authStateCode = -2;
         }
-        else if (profile.Disabled) {
+        else if (subjectProfile.Disabled) {
           validationOutcomeMessage = "subject is blocked!";
           authStateCode = -2;
-          profile = null;
+          subjectProfile = null;
         }
       }
 
-      if (profile == null) {
+      if (subjectProfile == null) {
         //this will be loaded for not-authenticated requests (if existing)
-        profile = ruleset.SubjectProfiles.Where(e => e.SubjectName == "(public)").SingleOrDefault();
-        if (profile != null && profile.Disabled) {
-          profile = null;
+        subjectProfile = ruleset.SubjectProfiles.Where(e => e.SubjectName == "(public)").SingleOrDefault();
+        if (subjectProfile != null && subjectProfile.Disabled) {
+          subjectProfile = null;
         }
       }
 
       //evaluate the optional Firewall-Rules (can only be done after a profile was assigned...)
-      if (profile != null && profile.AllowedHosts != null && !profile.AllowedHosts.Contains("*")) {
+      if (subjectProfile != null && subjectProfile.AllowedHosts != null && !subjectProfile.AllowedHosts.Contains("*")) {
         //TODO: *-resolving via regex!!!!!!!!!! + fallback for DNS-names to IP!!!
-        if (!profile.AllowedHosts.Contains(callerHost.ToLower())) {
+        if (!subjectProfile.AllowedHosts.Contains(callerHost.ToLower())) {
           authStateCode = -3;
           validationOutcomeMessage = "access denied by firewall rules";
         }
@@ -174,20 +208,20 @@ namespace Security.AccessTokenHandling {
       }
 
       var scopes = new List<string>();
-      if (profile == null) {
+      if (subjectProfile == null) {
         identityLabel = "(not authenticated)";
       }
       else {
-        identityLabel = profile.SubjectName;
+        identityLabel = subjectProfile.SubjectTitle;
         //import permissions/clearances from profile
-        if (profile.DefaultApiPermissions != null) {
-          foreach (var defaultApiPermission in profile.DefaultApiPermissions) {
+        if (subjectProfile.DefaultApiPermissions != null) {
+          foreach (var defaultApiPermission in subjectProfile.DefaultApiPermissions) {
             scopes.Add("API:" + defaultApiPermission);
           }
         }
-        if (profile.DefaultDataAccessClearances != null) {
-          foreach (string dimensionName in profile.DefaultDataAccessClearances.Keys) {
-            string[] values = profile.DefaultDataAccessClearances[dimensionName].Split(',').Select(t => t.Trim()).Where(t => !string.IsNullOrWhiteSpace(t)).ToArray();
+        if (subjectProfile.DefaultDataAccessClearances != null) {
+          foreach (string dimensionName in subjectProfile.DefaultDataAccessClearances.Keys) {
+            string[] values = subjectProfile.DefaultDataAccessClearances[dimensionName].Split(',').Select(t => t.Trim()).Where(t => !string.IsNullOrWhiteSpace(t)).ToArray();
             foreach (var value in values) {
               scopes.Add(dimensionName + ":" + value);
             }
@@ -198,13 +232,21 @@ namespace Security.AccessTokenHandling {
       //if there is a VALID token and we are configured to import permissions/clearances from the JWT-scope field!
       if (authStateCode == 1 && jwtContent != null && ruleset.ApplyApiPermissionsFromJwtScope) {
         string[] jwtScopes;
-        jwtContent.scp = jwtContent.scp.Replace(";", ",");
-        if (jwtContent.scp.Contains(",")) {
-          jwtScopes = jwtContent.scp.Split(',').Select(t => t.Trim()).Where(t => !string.IsNullOrWhiteSpace(t)).ToArray();
+        string rawScopes = string.Empty;
+        if (!String.IsNullOrWhiteSpace(jwtContent.scp)) {
+          rawScopes = jwtContent.scp;
         }
-        else {
-          jwtScopes = jwtContent.scp.Split(' ').Select(t => t.Trim()).Where(t => !string.IsNullOrWhiteSpace(t)).ToArray();
+
+        if (jwtContent.scope != null) {
+          rawScopes = rawScopes + "," + jwtContent.scope.ToString();
+          //if (jwtContent.scope.GetType() == typeof(string)) {
+          //  rawScopes = rawScopes + "," + jwtContent.scope.ToString();
+          //}
+          //if(jwtContent.scope.GetType() == typeof(string[])) {
+          //  rawScopes = rawScopes + "," + String.Join(",", jwtContent.scope);
+          //}
         }
+        jwtScopes = rawScopes.Split(',', ';', ' ').Where(t => !string.IsNullOrWhiteSpace(t)).ToArray();
         foreach (string jwtScope in jwtScopes) {
           scopes.Add(jwtScope);
         }
@@ -225,14 +267,19 @@ namespace Security.AccessTokenHandling {
       /// <summary> expires (unix-epoch utc) </summary>
       public long exp { get; set; } = 0;
 
+      /*
       /// <summary> audience </summary>
       public String aud { get; set; } = string.Empty;
+      */
 
-      /// <summary> scope </summary>
+      /// <summary> OAUTH Scope(s) in long name </summary>
+      public object scope { get; set; } = string.Empty;
+
+      /// <summary> OAUTH Scope(s) in short name </summary>
       public String scp { get; set; } = string.Empty;
 
     }
 
-  }
+    }
 
 }
