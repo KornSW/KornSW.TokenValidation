@@ -98,7 +98,7 @@ namespace Security.AccessTokenHandling {
           issuerProfile = ruleset.IssuerProfiles.Where(e => e.IssuerName.Equals(issuerName, StringComparison.InvariantCultureIgnoreCase)).SingleOrDefault();
           if (issuerProfile == null) {
             //fallback
-            issuerProfile = ruleset.IssuerProfiles.Where(e => e.IssuerName == "?").SingleOrDefault();
+            issuerProfile = ruleset.IssuerProfiles.Where(e => e.IssuerName.Equals("(unknown)", StringComparison.InvariantCultureIgnoreCase)).SingleOrDefault();
           }
           if (issuerProfile == null) {
             validationOutcomeMessage = "'Authorization'-Header contains an invalid bearer token (unknown issuer)!";
@@ -172,7 +172,7 @@ namespace Security.AccessTokenHandling {
         subjectProfile = ruleset.SubjectProfiles.Where(e => e.SubjectName.Equals(subjectName, StringComparison.InvariantCultureIgnoreCase)).SingleOrDefault();
         if (subjectProfile == null) {
           //fallback
-          subjectProfile = ruleset.SubjectProfiles.Where(e => e.SubjectName == "?").SingleOrDefault();
+          subjectProfile = ruleset.SubjectProfiles.Where(e => e.SubjectName.Equals("(generic)", StringComparison.InvariantCultureIgnoreCase)).SingleOrDefault();
         }
         if (subjectProfile == null) {
           validationOutcomeMessage = "'Authorization'-Header contains an invalid bearer token (unknown subject)!";
@@ -187,7 +187,7 @@ namespace Security.AccessTokenHandling {
 
       if (subjectProfile == null) {
         //this will be loaded for not-authenticated requests (if existing)
-        subjectProfile = ruleset.SubjectProfiles.Where(e => e.SubjectName == "(public)").SingleOrDefault();
+        subjectProfile = ruleset.SubjectProfiles.Where(e => e.SubjectName.Equals("(anonymous)", StringComparison.InvariantCultureIgnoreCase)).SingleOrDefault();
         if (subjectProfile != null && subjectProfile.Disabled) {
           subjectProfile = null;
         }
